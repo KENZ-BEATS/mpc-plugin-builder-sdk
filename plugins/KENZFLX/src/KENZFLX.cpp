@@ -5,17 +5,13 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kTwoPi = 2.0f * kPi;
-
-static inline float clamp01(float x)
-{
-    return std::clamp(x, 0.0f, 1.0f);
-}
 
 static inline float softClip(float x)
 {
@@ -139,14 +135,6 @@ struct StereoReverb
     }
 };
 
-enum class TimeMode
-{
-    Bypass = 0,
-    HalfTime = 1,
-    FlexBeat = 2,
-    Reverse = 3
-};
-
 struct TempoSliceEngine
 {
     std::vector<float> historyL;
@@ -156,7 +144,7 @@ struct TempoSliceEngine
 
     void prepare(float sampleRate)
     {
-        historySize = std::max<size_t>(4096, static_cast<size_t>(sampleRate * 2.5f));
+        historySize = std::max<size_t>(4096, static_cast<size_t>(sampleRate * 32.0f));
         historyL.assign(historySize, 0.0f);
         historyR.assign(historySize, 0.0f);
         writeIndex = 0;
@@ -175,15 +163,26 @@ struct TempoSliceEngine
         return a * (1.0f - t) + b * t;
     }
 
-    void process(float inL, float inR,
-                 float reverseValue,
-                 double bpm,
-                 double ppqPos,
-                 int numerator,
-                 int denominator,
-                 float sampleRate,
-                 float& outL,
-                 float& outR)
+    float read(const std::vector<float>& buffer, float delaySamples) const
+    {
+        if (historySize == 0)
+            return 0.0f;
+
+        const float delay = std::clamp(delaySamples, 1.0f, static_cast<float>(historySize - 1));
+        float position = static_cast<float>(writeIndex) - delay;
+        if (position < 0.0f)
+            position += static_cast<float>(historySize);
+
+        const size_t index0 = static_cast<size_t>(position);
+        const size_t index1 = (index0 + 1) % historySize;
+        const float fraction = position - static_cast<float>(index0);
+        return buffer[index0] + (buffer[index1] - buffer[index0]) * fraction;
+    }
+
+    void process(float inL, float inR, double ppqPos, double bpm, float sampleRate,
+                 int numerator, int denominator, int loopLength,
+                 float halfTime, float glitch, float repeat, float reverse,
+                 float& outL, float& outR)
     {
         if (historySize == 0)
         {
@@ -196,108 +195,70 @@ struct TempoSliceEngine
         historyR[writeIndex] = inR;
         writeIndex = (writeIndex + 1) % historySize;
 
-        const float rv = clamp01(reverseValue);
-        if (rv < 0.01f)
-        {
-            outL = inL;
-            outR = inR;
-            return;
-        }
-
-        const TimeMode mode = (rv <= 0.25f) ? TimeMode::HalfTime :
-                              (rv <= 0.75f) ? TimeMode::FlexBeat : TimeMode::Reverse;
-
         const double safeBpm = std::max(1.0, bpm);
-        const int numBeats = std::max(1, numerator);
-        const int den = std::max(1, denominator);
-        const double barSeconds = (60.0 / safeBpm) * (4.0 * static_cast<double>(numBeats) / static_cast<double>(den));
-        const size_t barSamples = std::clamp(
-            static_cast<size_t>(barSeconds * sampleRate),
-            size_t{1024},
-            historySize - 1);
-        const size_t sliceSamples = std::max<size_t>(64, barSamples / 8);
-
-        const float fadeWidth = std::clamp(0.005f * sampleRate, 32.0f, 128.0f);
-        const float fadeAlpha = std::clamp(fadeWidth / std::max(1.0f, static_cast<float>(sliceSamples)), 0.0f, 1.0f);
-
+        const double samplesPerBeat = static_cast<double>(sampleRate) * 60.0 / safeBpm;
+        const double beatPhase = ppqPos - std::floor(ppqPos);
         float wetL = inL;
         float wetR = inR;
 
-        switch (mode)
+        if (halfTime > 0.001f)
         {
-            case TimeMode::HalfTime:
-            {
-                const size_t delaySamples = std::max<size_t>(64, barSamples / 2);
-                const size_t readIndex = (writeIndex + historySize - delaySamples) % historySize;
+            static constexpr std::array<double, 4> loopBars = {0.5, 1.0, 2.0, 4.0};
+            const double beatsPerBar =
+                std::max(1, numerator) * 4.0 / std::max(1, denominator);
+            const double sourceSpan = beatsPerBar * loopBars[std::clamp(loopLength, 0, 3)];
+            const double cycleBeats = sourceSpan * 2.0;
+            const double cyclePhase = ppqPos - std::floor(ppqPos / cycleBeats) * cycleBeats;
+            const float delay = static_cast<float>((sourceSpan + cyclePhase * 0.5) * samplesPerBeat);
+            wetL = crossFade(wetL, read(historyL, delay), halfTime);
+            wetR = crossFade(wetR, read(historyR, delay), halfTime);
+        }
 
-                const float delayedL = historyL[readIndex];
-                const float delayedR = historyR[readIndex];
-                const float mix = 0.5f + 0.5f * std::sin(static_cast<float>(ppqPos) * 0.25f);
-                wetL = crossFade(inL, delayedL, mix);
-                wetR = crossFade(inR, delayedR, mix);
+        if (glitch > 0.001f)
+        {
+            static constexpr std::array<std::array<int, 8>, 4> patterns = {{
+                {{0, 1, 1, 3, 2, 2, 5, 7}},
+                {{0, 3, 1, 1, 4, 6, 2, 7}},
+                {{0, 0, 2, 3, 1, 5, 5, 7}},
+                {{7, 6, 5, 4, 3, 2, 1, 0}}
+            }};
 
-                const float a = std::clamp((rv - 0.01f) / 0.24f, 0.0f, 1.0f);
-                wetL = crossFade(inL, wetL, a * (1.0f - fadeAlpha));
-                wetR = crossFade(inR, wetR, a * (1.0f - fadeAlpha));
-                break;
-            }
+            const int subdivisions = glitch < 0.34f ? 2 : (glitch < 0.67f ? 4 : 8);
+            const double subdivisionPhase = beatPhase * subdivisions;
+            const int subdivisionIndex = std::min(subdivisions - 1, static_cast<int>(subdivisionPhase));
+            const double phaseInSlice = subdivisionPhase - subdivisionIndex;
+            const int patternIndex = std::min(3, static_cast<int>(glitch * 4.0f));
+            const int patternCell = std::min(7, subdivisionIndex * 8 / subdivisions);
+            const int mappedCell = patterns[patternIndex][patternCell];
+            const int sourceIndex = mappedCell * subdivisions / 8;
+            const double sourcePosition = (sourceIndex + phaseInSlice) / subdivisions;
+            const double ageBeats = 1.0 + beatPhase - sourcePosition;
+            const float delay = static_cast<float>(ageBeats * samplesPerBeat);
 
-            case TimeMode::FlexBeat:
-            {
-                const size_t local = writeIndex % barSamples;
-                const size_t sliceIndex = local / sliceSamples;
-                const size_t patternIndex = static_cast<size_t>((static_cast<float>(sliceIndex + 1) * (0.15f + rv * 1.2f))) % 6u;
+            const float glitchL = read(historyL, delay);
+            const float glitchR = read(historyR, delay);
+            const float amount = std::clamp(glitch * 1.6f, 0.0f, 1.0f);
+            wetL = crossFade(wetL, glitchL, amount);
+            wetR = crossFade(wetR, glitchR, amount);
+        }
 
-                static constexpr std::array<std::array<int, 8>, 6> patterns = {{
-                    {{0, 1, 2, 3, 4, 5, 6, 7}},
-                    {{0, 2, 1, 3, 5, 4, 6, 7}},
-                    {{0, 4, 1, 5, 2, 6, 3, 7}},
-                    {{0, 3, 6, 1, 4, 7, 2, 5}},
-                    {{0, 5, 2, 7, 1, 6, 3, 4}},
-                    {{0, 1, 4, 7, 2, 5, 6, 3}}
-                }};
+        if (repeat > 0.001f)
+        {
+            const int subdivisions = repeat < 0.25f ? 2 : (repeat < 0.50f ? 4 : (repeat < 0.75f ? 8 : 16));
+            const double subdivisionPhase = beatPhase * subdivisions;
+            const double phaseInSlice = subdivisionPhase - std::floor(subdivisionPhase);
+            const double sourcePosition = (1.0 - 1.0 / subdivisions) + phaseInSlice / subdivisions;
+            const double ageBeats = 1.0 + beatPhase - sourcePosition;
+            const float delay = static_cast<float>(ageBeats * samplesPerBeat);
+            wetL = crossFade(wetL, read(historyL, delay), repeat);
+            wetR = crossFade(wetR, read(historyR, delay), repeat);
+        }
 
-                const size_t targetSlice = static_cast<size_t>(patterns[patternIndex][sliceIndex % 8]);
-                const size_t targetOffset = std::min(targetSlice * sliceSamples + (local % sliceSamples), historySize - 1);
-
-                const size_t readIndex = (writeIndex + historySize - targetOffset - 1) % historySize;
-                const size_t readIndex2 = (readIndex + historySize - 1) % historySize;
-
-                const float l0 = historyL[readIndex];
-                const float r0 = historyR[readIndex];
-                const float l1 = historyL[readIndex2];
-                const float r1 = historyR[readIndex2];
-
-                const float alpha = std::clamp((static_cast<float>(local % sliceSamples)) / static_cast<float>(sliceSamples), 0.0f, 1.0f);
-                wetL = crossFade(l0, l1, alpha);
-                wetR = crossFade(r0, r1, alpha);
-
-                const float floorMix = std::clamp((rv - 0.26f) / 0.49f, 0.0f, 1.0f);
-                wetL = crossFade(inL, wetL, floorMix * (1.0f - fadeAlpha));
-                wetR = crossFade(inR, wetR, floorMix * (1.0f - fadeAlpha));
-                break;
-            }
-
-            case TimeMode::Reverse:
-            default:
-            {
-                const size_t bounceSamples = std::min(std::max<size_t>(128, barSamples / 2), historySize - 1);
-                const size_t readIndex = (writeIndex + historySize - bounceSamples - 1) % historySize;
-                const size_t readIndex2 = (readIndex + historySize - 1) % historySize;
-
-                const float reverseL = historyL[readIndex];
-                const float reverseR = historyR[readIndex];
-                const float reverseL2 = historyL[readIndex2];
-                const float reverseR2 = historyR[readIndex2];
-
-                const float alpha = std::clamp((rv - 0.76f) / 0.24f, 0.0f, 1.0f);
-                wetL = crossFade(inL, reverseL, alpha);
-                wetR = crossFade(inR, reverseR, alpha);
-
-                wetL = crossFade(wetL, reverseL2, alpha * fadeAlpha);
-                wetR = crossFade(wetR, reverseR2, alpha * fadeAlpha);
-                break;
-            }
+        if (reverse > 0.001f)
+        {
+            const float delay = static_cast<float>((1.0 + beatPhase * 2.0) * samplesPerBeat);
+            wetL = crossFade(wetL, read(historyL, delay), reverse);
+            wetR = crossFade(wetR, read(historyR, delay), reverse);
         }
 
         outL = wetL;
@@ -317,11 +278,18 @@ struct KenzFlxDSP
     float crush = 0.10f;
     float mix = 0.70f;
     float reverse = 0.0f;
+    float halfTime = 0.0f;
+    float glitch = 0.0f;
+    float repeat = 0.0f;
+    int loopLength = 0;
     float inputGainDb = 0.0f;
 
     float sampleRate = 44100.0f;
     double bpm = 120.0;
     double ppqPos = 0.0;
+    double freePpq = 0.0;
+    bool hostPpqValid = false;
+    bool transportPlaying = false;
     int timeSigNumerator = 4;
     int timeSigDenominator = 4;
 
@@ -352,6 +320,7 @@ struct KenzFlxDSP
     void reset()
     {
         lpL = lpR = hpL = hpR = hpInputL = hpInputR = 0.0f;
+        freePpq = 0.0;
         chorusStage.reset();
         delayStageL.reset();
         delayStageR.reset();
@@ -366,6 +335,8 @@ struct KenzFlxDSP
 
         const float inputGainLinear = std::pow(10.0f, inputGainDb / 20.0f);
         const float steps = std::max(8.0f, 256.0f * (1.0f - crush * 0.9f));
+        const double ppqPerSample = static_cast<double>(bpm) / (60.0 * sampleRate);
+        const double blockPpq = hostPpqValid && transportPlaying ? ppqPos : freePpq;
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -420,14 +391,11 @@ struct KenzFlxDSP
             float timeR = sR;
             float tempL = sL;
             float tempR = sR;
-            timeEngine.process(sL, sR, reverse, bpm, ppqPos, timeSigNumerator,
-                               timeSigDenominator, sampleRate, tempL, tempR);
-            if (reverse > 0.01f)
-            {
-                const float blend = std::clamp((reverse - 0.01f) / 0.99f, 0.0f, 1.0f);
-                timeL = sL * (1.0f - blend) + tempL * blend;
-                timeR = sR * (1.0f - blend) + tempR * blend;
-            }
+            timeEngine.process(sL, sR, blockPpq + i * ppqPerSample, bpm, sampleRate,
+                               timeSigNumerator, timeSigDenominator, loopLength,
+                               halfTime, glitch, repeat, reverse, tempL, tempR);
+            timeL = tempL;
+            timeR = tempR;
 
             float chorusL = 0.0f;
             float chorusR = 0.0f;
@@ -465,6 +433,8 @@ struct KenzFlxDSP
             leftChannel[i] = outL;
             rightChannel[i] = outR;
         }
+
+        freePpq = blockPpq + numSamples * ppqPerSample;
     }
 };
 
@@ -486,6 +456,10 @@ public:
         kMix,
         kReverse,
         kInputGain,
+        kHalfTime,
+        kGlitch,
+        kRepeat,
+        kLoopLength,
         kNumParams
     };
 
@@ -495,7 +469,7 @@ public:
         info.name = "KENZFLX";
         info.vendor = "KENZ";
         info.uniqueId = MPC_FOURCC('K', 'F', 'V', 'B');
-        info.version = 1000;
+        info.version = 1100;
         info.isInstrument = false;
         info.numInputs = 2;
         info.numOutputs = 2;
@@ -516,10 +490,22 @@ public:
         addParam(mpc::floatParam("mix", "Mix", 0.0f, 1.0f, 0.70f, "", 2));
         addParam(mpc::floatParam("reverse", "Reverse", 0.0f, 1.0f, 0.0f, "", 2));
         addParam(mpc::floatParam("inputGain", "Input Gain", -24.0f, 0.0f, 0.0f, "dB", 1));
+        addParam(mpc::floatParam("halfTime", "Half-Time", 0.0f, 1.0f, 0.0f, "", 2));
+        addParam(mpc::floatParam("glitch", "Glitch", 0.0f, 1.0f, 0.0f, "", 2));
+        addParam(mpc::floatParam("repeat", "Repeat", 0.0f, 1.0f, 0.0f, "", 2));
+        addParam(mpc::choiceParam("loopLength", "Loop Length",
+                                  {"1/2 Bar", "1 Bar", "2 Bars", "4 Bars"}, 0));
 
         for (int i = 0; i < kNumPresets; ++i)
         {
             const KenzflxPreset& p = kKenzflxPresets[i];
+            const char* name = p.name;
+            const bool isHalfTime = std::strncmp(name, "[HALF]", 6) == 0;
+            const bool isGlitch = std::strncmp(name, "[FLEX]", 6) == 0 ||
+                                  std::strncmp(name, "[FX]", 4) == 0;
+            const bool isReverse = std::strncmp(name, "[REV]", 5) == 0;
+            const bool isRepeat = std::strstr(name, "Stutter") != nullptr ||
+                                  std::strstr(name, "Bounce Gate") != nullptr;
             addProgram(p.name, {
                 1.0f,
                 p.drive,
@@ -530,7 +516,11 @@ public:
                 p.reverb,
                 p.crush,
                 p.mix,
-                p.reverse,
+                isReverse ? 0.5f + p.reverse * 0.5f : 0.0f,
+                0.0f,
+                isHalfTime ? 0.5f + p.reverse * 0.5f : 0.0f,
+                isGlitch ? 0.5f + p.reverse * 0.5f : 0.0f,
+                isRepeat ? std::max(0.6f, p.reverse) : 0.0f,
                 0.0f
             });
         }
@@ -574,13 +564,24 @@ public:
         dsp_.mix = get(kMix);
         dsp_.reverse = get(kReverse);
         dsp_.inputGainDb = get(kInputGain);
+        dsp_.halfTime = get(kHalfTime);
+        dsp_.glitch = get(kGlitch);
+        dsp_.repeat = get(kRepeat);
+        dsp_.loopLength = getInt(kLoopLength);
 
         if (ctx.transport.valid)
         {
             dsp_.bpm = ctx.transport.tempoValid ? ctx.transport.bpm : 120.0;
             dsp_.ppqPos = ctx.transport.ppqValid ? ctx.transport.ppqPos : 0.0;
+            dsp_.hostPpqValid = ctx.transport.ppqValid;
+            dsp_.transportPlaying = ctx.transport.playing;
             dsp_.timeSigNumerator = ctx.transport.timeSigNumerator > 0 ? ctx.transport.timeSigNumerator : 4;
             dsp_.timeSigDenominator = ctx.transport.timeSigDenominator > 0 ? ctx.transport.timeSigDenominator : 4;
+        }
+        else
+        {
+            dsp_.hostPpqValid = false;
+            dsp_.transportPlaying = false;
         }
 
         if (inputL != outputL)

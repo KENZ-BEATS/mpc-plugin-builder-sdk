@@ -3,15 +3,19 @@
 An insert effect plugin for Akai MPC standalone hardware, by KENZ.
 
 KENZFLX combines drive, tone shaping, chorus, delay, reverb, bit-crushing and
-tempo-sliced effects in one stereo insert. The Reverse control blends between
-the normal signal, half-time and beat-slice processing, then reverse-style
-playback at its upper range.
+tempo-synced time effects in one stereo insert. Reverse plays the preceding
+quarter-note slice backwards; Half-Time replays the selected 1/2, 1, 2, or 4
+bar loop at half speed; Glitch rearranges and stutters beat subdivisions;
+Repeat loops the last captured subdivision at tempo-synced rates. The MPC UI
+organizes controls into COLOR, MOD, SPACE and TIME pages, and refreshes
+their displayed values when a built-in program is selected.
 
 The effect is an experimental DSP implementation; listen for artifacts and
 save projects before using it on a live set.
 
-The built-in library contains 133 programs grouped by the INIT/HALF, FLEX,
-LOFI, REV, SPCE and FX categories.
+The built-in library contains 100 programs grouped by category: INIT/HALF (12),
+FLEX (22), LOFI (15), REV (16), SPCE (16) and FX (19). The old preset Reverse
+amount is assigned to the matching Half-Time, Glitch, or Reverse control.
 
 ## Build
 

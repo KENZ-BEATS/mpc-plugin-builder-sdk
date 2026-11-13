@@ -3,6 +3,7 @@
 ## Built-in programs (recommended)
 
 Declare presets in code with `addProgram("Name", { ...plain values in parameter order... })`. The MPC lists them in the plugin's preset selector, remembers the chosen program number in the project, and your parameters snap to the stored values when one is chosen. This works on every product, needs no files, and cannot get out of sync with the plugin.
+When a program is selected, the framework notifies the host of each parameter value and requests a display refresh so the MPC's on-screen controls follow the preset.
 
 ```cpp
 // After addParam(...) calls, in the constructor:

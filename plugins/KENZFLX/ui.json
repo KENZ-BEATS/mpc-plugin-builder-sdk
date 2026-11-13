@@ -8,18 +8,32 @@
         { "param": "Drive", "widget": "knob" },
         { "param": "Warmth", "widget": "knob" },
         { "param": "Tone", "widget": "knob" },
+        { "param": "Crush", "widget": "knob" },
         { "param": "Mix", "widget": "fader" },
         { "param": "Input Gain", "widget": "knob" }
       ]
     },
     {
-      "name": "FX",
+      "name": "MOD",
       "controls": [
-        { "param": "Chorus", "widget": "knob" },
+        { "param": "Chorus", "widget": "knob" }
+      ]
+    },
+    {
+      "name": "SPACE",
+      "controls": [
         { "param": "Delay", "widget": "knob" },
-        { "param": "Reverb", "widget": "knob" },
-        { "param": "Crush", "widget": "knob" },
-        { "param": "Reverse", "widget": "knob" }
+        { "param": "Reverb", "widget": "knob" }
+      ]
+    },
+    {
+      "name": "TIME",
+      "controls": [
+        { "param": "Reverse", "widget": "knob" },
+        { "param": "Half-Time", "widget": "knob" },
+        { "param": "Loop Length", "widget": "slider", "overlay": "menu" },
+        { "param": "Glitch", "widget": "knob" },
+        { "param": "Repeat", "widget": "knob" }
       ]
     }
   ],

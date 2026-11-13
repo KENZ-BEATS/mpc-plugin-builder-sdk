@@ -556,8 +556,13 @@ public:
         if (programs_.empty() || i < 0 || i >= (int)programs_.size()) return;
         currentProgram_ = i;
         const Program& p = programs_[(size_t)i];
-        for (int k = 0; k < numParams() && k < (int)p.plainValues.size(); ++k) set(k, p.plainValues[(size_t)k]);
+        for (int k = 0; k < numParams() && k < (int)p.plainValues.size(); ++k)
+        {
+            set(k, p.plainValues[(size_t)k]);
+            notifyHostParameterChanged(k);
+        }
         stateLoadPending_.store(true, std::memory_order_release);
+        requestDisplayUpdate();
     }
 
     std::string displayText(int i)
