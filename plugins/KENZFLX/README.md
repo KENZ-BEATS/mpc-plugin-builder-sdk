@@ -10,6 +10,9 @@ playback at its upper range.
 The effect is an experimental DSP implementation; listen for artifacts and
 save projects before using it on a live set.
 
+The built-in library contains 133 programs grouped by the INIT/HALF, FLEX,
+LOFI, REV, SPCE and FX categories.
+
 ## Build
 
 ```
@@ -21,6 +24,7 @@ python tools/package.py plugins/KENZFLX
 
 - `plugin.json` - manifest (name, manufacturer, uid). The `uid` must match the C++ `uniqueId`.
 - `src/KENZFLX.cpp` - the plugin source (parameters and DSP).
+- `src/KenzflxPresets.h` - categorized built-in programs.
 - `ui.json` - which parameters appear on the MPC screen, in which order.
 - `build/` - build output (the deployable `KENZ - VST - KENZFLX` folder lives here).
 - `dist/` - zips produced by `package.py`.
